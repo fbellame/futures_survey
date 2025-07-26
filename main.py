@@ -23,6 +23,12 @@ import re
 from user_data import UserData
 from recording import start_s3_recording
 
+# --- New imports for DB integration ---
+import sqlite3
+from db_manager import (
+    DB_PATH, create_campaign, add_question, record_call, record_answer
+)
+
 load_dotenv()
 
 logger = logging.getLogger("futures_survey_assistant")
@@ -30,23 +36,38 @@ logger.setLevel(logging.INFO)
     
 RunContext_T = RunContext[UserData]
 
-def load_survey_questions(path="survey_questions.json"):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def get_campaign_from_db(db_path=DB_PATH):
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, name, description, intro_prompt, purpose_explanation, greeting, closing FROM campaign ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        if not row:
+            raise Exception("No campaign found in database.")
+        return {
+            "id": row[0],
+            "name": row[1],
+            "description": row[2],
+            "intro_prompt": row[3],
+            "purpose_explanation": row[4],
+            "greeting": row[5],
+            "closing": row[6],
+        }
 
-SURVEY_QUESTIONS = load_survey_questions()
+def get_questions_for_campaign(campaign_id, db_path=DB_PATH):
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, question_text, question_order FROM question WHERE campaign_id = ? ORDER BY question_order", (campaign_id,))
+        return cur.fetchall()
 
-def build_dynamic_prompt() -> str:
-    """Build the survey prompt dynamically based on the questions configuration"""
+def build_dynamic_prompt_from_db():
+    campaign = get_campaign_from_db()
+    questions = get_questions_for_campaign(campaign["id"])
     current_time = datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')
-    
-    # Build the questions section dynamically
     questions_section = ""
-    for q_num, question in SURVEY_QUESTIONS.items():
-        questions_section += f"\n{int(q_num) + 1}) Question {q_num}:\n   \"{question}\"\n"
-    
+    for qid, qtext, qorder in questions:
+        questions_section += f"\n{qorder}) Question {qorder}:\n   \"{qtext}\"\n"
     prompt = f"""
-You are the automated survey agent for the InnoVet-AMR initiative on climate change, antimicrobial resistance (AMR), and animal health.
+{campaign['intro_prompt']}
 Current date and time: {current_time}
 
 LANGUAGE POLICY
@@ -57,15 +78,14 @@ Never use special characters such as %, $, #, or *.
 SURVEY FLOW (ask only one question at a time)
 
 1) Briefly explain purpose:
-   "Thank you for taking part in our InnoVet-AMR survey. We are collecting insights on trends and the changing landscape of climate change, AMR, and animal health."
+   \"{campaign['purpose_explanation']}\"
 {questions_section}
+{len(questions) + 3}) Completion check:
+   After the recap, call check_survey_complete to ensure all questions were answered.
 
-{len(SURVEY_QUESTIONS) + 3}) Completion check:
-   After the recap, call check_survey_complete to ensure all three questions were answered.
-
-{len(SURVEY_QUESTIONS) + 4}) Closing:
+{len(questions) + 4}) Closing:
    If complete, say:
-   "Thank you for completing this survey. We value your input and look forward to you participating in our other research."
+   \"{campaign['closing']}\"
    Then immediately end the call using the end_call function.
 
 GENERAL GUIDELINES
@@ -75,89 +95,51 @@ If the participant provides unexpected information, politely steer them back to 
 Do not provide medical or technical advice; clarify that your role is limited to conducting this survey.
 If the participant asks for information outside your scope, respond succinctly that you can only administer the survey.
 """
-    return prompt
+    return prompt, campaign, questions
 
 class MainAgent(Agent):
     def __init__(self) -> None:
-        # Use the dynamic prompt builder
-        MAIN_PROMPT = build_dynamic_prompt()
-            
+        MAIN_PROMPT, self.campaign, self.questions = build_dynamic_prompt_from_db()
         logger.info("MainAgent initialized with dynamic prompt: %s", MAIN_PROMPT)
-       
         super().__init__(
             instructions=MAIN_PROMPT,
             tools=[set_questionnaire_answer, check_survey_complete],
             tts=openai.TTS(voice="nova"),
         )
-        
     async def on_enter(self) -> None:
         await self.session.say(
-            "Hello, welcome to our survey.",
+            self.campaign["greeting"] or "Hello, welcome to our survey.",
             allow_interruptions=False,
         )
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
-async def save_userdata_to_s3(userdata: UserData) -> bool:
-    """Save userdata as JSON to S3 bucket with phone number, future_survey, and date in filename"""
-    try:
-        aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        aws_region = os.getenv("AWS_REGION", "us-east-1")
-        s3_bucket = "s3-photo-ai-saas"
-        
-        if not all([aws_access_key, aws_secret_key]):
-            logger.error("Missing AWS credentials for S3 upload")
-            return False
-        
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            region_name=aws_region
-        )
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        phone_suffix = userdata.customer_phone.replace('+', '').replace('-', '') if userdata.customer_phone else 'unknown'
-        filename = f"future_survey/{phone_suffix}_future_survey_{timestamp}.json"
-        
-        # Optimized JSON structure
-        userdata_dict = {
-            "customer": {
-                "first_name": userdata.customer_first_name,
-                "last_name": userdata.customer_last_name,
-                "phone": userdata.customer_phone,
-            },
-            "answers": [
-                {
-                    "question_number": q_num,
-                    "question": SURVEY_QUESTIONS.get(q_num, "Unknown question"),
-                    "answer": answer
-                } for q_num, answer in userdata.questionnaire_answers.items()
-            ],
-            "recording_id": userdata.recording_id,
-            "timestamp": timestamp
-        }
-        
-        json_data = json.dumps(userdata_dict, indent=2, ensure_ascii=False)
-        
-        s3_client.put_object(
-            Bucket=s3_bucket,
-            Key=filename,
-            Body=json_data,
-            ContentType='application/json'
-        )
-        
-        logger.info(f"Userdata saved to S3: s3://{s3_bucket}/{filename}")
-        return True
-        
-    except ClientError as e:
-        logger.error(f"S3 upload error: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Error saving userdata to S3: {e}")
-        return False
+# --- Remove S3 JSON save, use DB instead ---
+async def save_userdata_to_db(userdata: UserData, campaign_id: int, call_id: int):
+    # Save S3 recording URL if present
+    if getattr(userdata, 's3_recording_url', None):
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE call SET s3_recording_url = ? WHERE id = ?", (userdata.s3_recording_url, call_id))
+            conn.commit()
+            logger.info(f"Updated call {call_id} with S3 recording URL: {userdata.s3_recording_url}")
+    elif getattr(userdata, 'recording_id', None):
+        # Optionally, if you have a way to build the S3 URL from recording_id, do it here
+        pass
+    # Save all answers to DB
+    for q_num, answer in userdata.questionnaire_answers.items():
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM question WHERE campaign_id = ? AND question_order = ?", (campaign_id, int(q_num)))
+            row = cur.fetchone()
+            if row:
+                question_id = row[0]
+                record_answer(call_id, question_id, answer)
+                logger.info(f"Saved answer for question {q_num} to DB.")
+            else:
+                logger.warning(f"Question id not found for campaign {campaign_id}, order {q_num}")
+    return True
     
 @function_tool    
 async def set_questionnaire_answer(
@@ -165,85 +147,63 @@ async def set_questionnaire_answer(
     answer: Annotated[str, Field(description="The answer")], 
     ctx: RunContext_T
 ) -> str:
-    """
-    Set questionnaire answers in the user data with question number as key.
-    """
     userdata = ctx.userdata
     userdata.questionnaire_answers[question_number] = answer
     logger.info(f"Question {question_number} answer set: {answer}")
     logger.info(f"All questionnaire answers: {userdata.questionnaire_answers}")
-    
-    # No S3 save here; only at the end
-    if len(userdata.questionnaire_answers) == len(SURVEY_QUESTIONS):
+    if len(userdata.questionnaire_answers) == len(userdata.questions):
         return f"Answer for question {question_number} has been saved successfully. Survey complete - ready for finalization: {answer}"
     else:
         return f"Answer for question {question_number} has been saved successfully: {answer}"
 
 @function_tool
 async def check_survey_complete(ctx: RunContext_T) -> str:
-    """
-    Check if the survey is complete and save to S3 if all questions are answered.
-    """
     userdata = ctx.userdata
-    total_questions = len(SURVEY_QUESTIONS)
+    total_questions = len(userdata.questions)
     answered_questions = len(userdata.questionnaire_answers)
-    
     logger.info(f"Survey completion check: {answered_questions}/{total_questions} questions answered")
-    
     if answered_questions == total_questions:
-        # Save complete survey to S3
-        s3_success = await save_userdata_to_s3(userdata)
-        if s3_success:
-            logger.info("Survey completed - all data saved to S3")
-            return f"Survey is complete! All {total_questions} questions have been answered and data has been saved to S3."
-        else:
-            logger.warning("Survey completed but S3 save failed")
-            return f"Survey is complete! All {total_questions} questions have been answered but S3 backup failed."
+        # Save complete survey to DB
+        await save_userdata_to_db(userdata, userdata.campaign["id"], userdata.call_id)
+        logger.info("Survey completed - all data saved to DB")
+        return f"Survey is complete! All {total_questions} questions have been answered and data has been saved to the database."
     else:
-        missing_questions = [q for q in SURVEY_QUESTIONS.keys() if q not in userdata.questionnaire_answers]
+        missing_questions = [str(q[2]) for q in userdata.questions if str(q[2]) not in userdata.questionnaire_answers]
         return f"Survey is not complete. {answered_questions}/{total_questions} questions answered. Missing questions: {missing_questions}"
-    
+
 def extract_phone_from_room_name(room_name: str) -> str:
-    """
-    Extract phone number from room name like 'call-_+15145859691_yZ35TYo5aNjy'
-    Returns the phone number or None if not found
-    """
     pattern = r'call-_(\+\d+)_'
     match = re.search(pattern, room_name)
-    
     if match:
         return match.group(1)
-    
     return None
     
 async def entrypoint(ctx: agents.JobContext):
-    
-   # Get room info and extract phone number
     room = ctx.room
     room_name = room.name
-    
     phone_number = extract_phone_from_room_name(room_name)
-    
     userdata = UserData()
     userdata.customer_phone = phone_number if phone_number else None
-  
     logger.info(f"Room name: {room_name}")
     logger.info(f"Phone number: {phone_number}")
-
-    
     userdata.agents.update({
         "main_agent": MainAgent(),
     })
-    
+    userdata.questions = userdata.agents["main_agent"].questions  # <-- Add this line
+    # Start S3 voice recording before recording the call in the DB
     recording_success = await start_s3_recording(room_name, userdata)
     if recording_success:
         logger.info("S3 Recording started successfully")
     else:
-        logger.warning("S3 Recording failed, continuing without recording")    
+        logger.warning("S3 Recording failed, continuing without recording")
+        userdata.s3_recording_url = None  # Explicitly set to None if failed
+    # Record the call in the DB
+    campaign = get_campaign_from_db()
+    call_id = record_call(phone_number or "unknown", campaign["id"], s3_recording_url=userdata.s3_recording_url)
+    userdata.call_id = call_id
+    userdata.campaign = campaign  # Store campaign dict in userdata
+    logger.info(f"Call recorded in DB with id: {call_id}")
     await ctx.connect()
-    
-    
-    # Use optimized session class
     session = AgentSession(
         userdata=userdata,
         stt=deepgram.STT(model="nova-3", language="en-US"),
@@ -252,10 +212,7 @@ async def entrypoint(ctx: agents.JobContext):
         vad=silero.VAD.load(),
         max_tool_steps=5,
     )
-    
-    # Store session reference in userdata for access in function tools
     userdata.session = session
-    
     await session.start(
         agent=userdata.agents["main_agent"],
         room=ctx.room,

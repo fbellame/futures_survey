@@ -63,8 +63,8 @@ if __name__ == "__main__":
     campaign_id = create_campaign(
         name="InnoVet-AMR 2024",
         description="Survey on climate change, AMR, and animal health.",
-        intro_prompt="You are the automated survey agent for the InnoVet-AMR initiative...",
-        purpose_explanation="Thank you for taking part in our InnoVet-AMR survey...",
+        intro_prompt="You are the automated survey agent for the InnoVet-AMR initiative.",
+        purpose_explanation="Thank you for taking part in our InnoVet-AMR survey.",
         greeting="Hello, welcome to our survey.",
         closing="Thank you for completing this survey. We value your input."
     )
@@ -78,12 +78,12 @@ if __name__ == "__main__":
         qid = add_question(campaign_id, q_text, int(q_num))
         print(f"Added question {q_num} with id: {qid}")
 
-    # Record a call with the provided S3 URL
-    s3_recording_url = "s3://s3-photo-ai-saas/future_survey/20250726_110446_15145859691_call-_+15145859691_cNDqHJJ3rZqi.mp4"
-    call_id = record_call("+1234567890", campaign_id, s3_recording_url=s3_recording_url)
-    print(f"Recorded call with id: {call_id}")
+    # # Record a call with the provided S3 URL
+    # s3_recording_url = "s3://s3-photo-ai-saas/future_survey/20250726_110446_15145859691_call-_+15145859691_cNDqHJJ3rZqi.mp4"
+    # call_id = record_call("+1234567890", campaign_id, s3_recording_url=s3_recording_url)
+    # print(f"Recorded call with id: {call_id}")
 
-    # Record an answer (for the first question as an example)
-    first_qid = 1
-    answer_id = record_answer(call_id, first_qid, "My main concern is antibiotic misuse.")
-    print(f"Recorded answer with id: {answer_id}") 
+    # # Record an answer (for the first question as an example)
+    # first_qid = 1
+    # answer_id = record_answer(call_id, first_qid, "My main concern is antibiotic misuse.")
+    # print(f"Recorded answer with id: {answer_id}") 
