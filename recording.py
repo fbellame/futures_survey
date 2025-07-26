@@ -69,6 +69,7 @@ async def start_s3_recording(room_name: str, userdata: UserData) -> bool:
             userdata.recording_id = response.egress_id
             logger.info(f"S3 Recording started successfully. Egress ID: {response.egress_id}")
             logger.info(f"Recording will be saved to: s3://{s3_bucket}/{filepath}")
+            userdata.s3_recording_url = f"s3://{s3_bucket}/{filepath}"
             return True
         else:
             logger.error("Failed to start S3 recording - no egress ID returned")
