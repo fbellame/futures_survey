@@ -11,4 +11,4 @@ twilio
 websockets
 requests
 boto3
-streamlit
+supabase

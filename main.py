@@ -1,63 +1,38 @@
 
 import logging
-import os
-import json
-import boto3
-from botocore.exceptions import ClientError
 
 from datetime import datetime, timezone
 from typing import Annotated
 
 from dotenv import load_dotenv
 from livekit import agents
-from livekit import api, rtc
 from livekit.agents import (Agent, AgentSession,
                             JobProcess, RoomInputOptions,
                             RunContext, function_tool)
 from livekit.plugins import deepgram, noise_cancellation, openai, silero
-from livekit.agents import get_job_context
 from pydantic import Field
-from twilio.rest import Client
 import re
 
 from user_data import UserData
 from recording import start_s3_recording
 
 # --- New imports for DB integration ---
-import sqlite3
 from db_manager import (
-    DB_PATH, create_campaign, add_question, record_call, record_answer
+    record_call, record_answer, 
+    get_campaign_from_db, get_questions_for_campaign, update_call_s3_url
 )
 
 load_dotenv()
 
 logger = logging.getLogger("futures_survey_assistant")
 logger.setLevel(logging.INFO)
+
+# Suppress hpack debug logs
+logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
     
 RunContext_T = RunContext[UserData]
 
-def get_campaign_from_db(db_path=DB_PATH):
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, name, description, intro_prompt, purpose_explanation, greeting, closing FROM campaign ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        if not row:
-            raise Exception("No campaign found in database.")
-        return {
-            "id": row[0],
-            "name": row[1],
-            "description": row[2],
-            "intro_prompt": row[3],
-            "purpose_explanation": row[4],
-            "greeting": row[5],
-            "closing": row[6],
-        }
-
-def get_questions_for_campaign(campaign_id, db_path=DB_PATH):
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, question_text, question_order FROM question WHERE campaign_id = ? ORDER BY question_order", (campaign_id,))
-        return cur.fetchall()
+# These functions are now imported from db_manager.py
 
 def build_dynamic_prompt_from_db():
     campaign = get_campaign_from_db()
@@ -119,26 +94,35 @@ def prewarm(proc: JobProcess):
 async def save_userdata_to_db(userdata: UserData, campaign_id: int, call_id: int):
     # Save S3 recording URL if present
     if getattr(userdata, 's3_recording_url', None):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE call SET s3_recording_url = ? WHERE id = ?", (userdata.s3_recording_url, call_id))
-            conn.commit()
-            logger.info(f"Updated call {call_id} with S3 recording URL: {userdata.s3_recording_url}")
+        update_call_s3_url(call_id, userdata.s3_recording_url)
+        logger.info(f"Updated call {call_id} with S3 recording URL: {userdata.s3_recording_url}")
     elif getattr(userdata, 'recording_id', None):
         # Optionally, if you have a way to build the S3 URL from recording_id, do it here
         pass
+    
+    # Get existing answers to avoid duplicates
+    from db_manager import get_existing_answers_for_call
+    existing_question_ids = get_existing_answers_for_call(call_id)
+    
     # Save all answers to DB
     for q_num, answer in userdata.questionnaire_answers.items():
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT id FROM question WHERE campaign_id = ? AND question_order = ?", (campaign_id, int(q_num)))
-            row = cur.fetchone()
-            if row:
-                question_id = row[0]
+        # Get question ID from Supabase
+        questions = get_questions_for_campaign(campaign_id)
+        question_id = None
+        for q_id, q_text, q_order in questions:
+            if q_order == int(q_num):
+                question_id = q_id
+                break
+        
+        if question_id:
+            # Only record if this question hasn't been answered yet
+            if question_id not in existing_question_ids:
                 record_answer(call_id, question_id, answer)
                 logger.info(f"Saved answer for question {q_num} to DB.")
             else:
-                logger.warning(f"Question id not found for campaign {campaign_id}, order {q_num}")
+                logger.info(f"Answer for question {q_num} already exists, skipping.")
+        else:
+            logger.warning(f"Question id not found for campaign {campaign_id}, order {q_num}")
     return True
     
 @function_tool    

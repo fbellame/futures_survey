@@ -1,6 +1,6 @@
 import yaml
 from dataclasses import dataclass, field
-from typing import Annotated, Optional
+from typing import Optional
 
 from livekit.agents import (Agent, AgentSession)
 
