@@ -19,7 +19,8 @@ from recording import start_s3_recording
 # --- New imports for DB integration ---
 from db_manager import (
     record_call, record_answer, 
-    get_campaign_from_db, get_questions_for_campaign, update_call_s3_url
+    get_campaign_from_db, get_questions_for_campaign, update_call_s3_url,
+    get_campaign_by_room_name, get_campaign_by_id
 )
 
 load_dotenv()
@@ -34,8 +35,8 @@ RunContext_T = RunContext[UserData]
 
 # These functions are now imported from db_manager.py
 
-def build_dynamic_prompt_from_db():
-    campaign = get_campaign_from_db()
+def build_dynamic_prompt_from_db(campaign):
+    """Build dynamic prompt from a specific campaign."""
     questions = get_questions_for_campaign(campaign["id"])
     current_time = datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')
     questions_section = ""
@@ -73,9 +74,9 @@ If the participant asks for information outside your scope, respond succinctly t
     return prompt, campaign, questions
 
 class MainAgent(Agent):
-    def __init__(self) -> None:
-        MAIN_PROMPT, self.campaign, self.questions = build_dynamic_prompt_from_db()
-        logger.info("MainAgent initialized with dynamic prompt: %s", MAIN_PROMPT)
+    def __init__(self, campaign, questions) -> None:
+        MAIN_PROMPT, self.campaign, self.questions = build_dynamic_prompt_from_db(campaign)
+        logger.info(f"MainAgent initialized for campaign '{campaign['name']}' with dynamic prompt: %s", MAIN_PROMPT)
         super().__init__(
             instructions=MAIN_PROMPT,
             tools=[set_questionnaire_answer, check_survey_complete],
@@ -170,10 +171,21 @@ async def entrypoint(ctx: agents.JobContext):
     userdata.customer_phone = phone_number if phone_number else None
     logger.info(f"Room name: {room_name}")
     logger.info(f"Phone number: {phone_number}")
+    
+    # Select campaign based on room name
+    campaign = get_campaign_by_room_name(room_name)
+    logger.info(f"Selected campaign: {campaign['name']} (ID: {campaign['id']})")
+    
+    # Get questions for the selected campaign
+    questions = get_questions_for_campaign(campaign["id"])
+    logger.info(f"Loaded {len(questions)} questions for campaign {campaign['id']}")
+    
     userdata.agents.update({
-        "main_agent": MainAgent(),
+        "main_agent": MainAgent(campaign, questions),
     })
-    userdata.questions = userdata.agents["main_agent"].questions  # <-- Add this line
+    userdata.questions = userdata.agents["main_agent"].questions
+    userdata.campaign = campaign  # Store campaign dict in userdata
+    
     # Start S3 voice recording before recording the call in the DB
     recording_success = await start_s3_recording(room_name, userdata)
     if recording_success:
@@ -181,12 +193,12 @@ async def entrypoint(ctx: agents.JobContext):
     else:
         logger.warning("S3 Recording failed, continuing without recording")
         userdata.s3_recording_url = None  # Explicitly set to None if failed
-    # Record the call in the DB
-    campaign = get_campaign_from_db()
-    call_id = record_call(phone_number or "unknown", campaign["id"], s3_recording_url=userdata.s3_recording_url)
+    
+    # Record the call in the DB with room name
+    call_id = record_call(phone_number or "unknown", campaign["id"], room_name, s3_recording_url=userdata.s3_recording_url)
     userdata.call_id = call_id
-    userdata.campaign = campaign  # Store campaign dict in userdata
     logger.info(f"Call recorded in DB with id: {call_id}")
+    
     await ctx.connect()
     session = AgentSession(
         userdata=userdata,

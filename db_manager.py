@@ -83,12 +83,84 @@ def add_question(campaign_id, question_text, question_order):
         print(f"Error adding question: {e}")
         raise
 
-def record_call(phone_number, campaign_id, call_timestamp=None, s3_recording_url=None):
+def create_campaign_room_mapping(campaign_id, room_pattern, is_active=True):
+    """Create a new campaign room mapping in Supabase."""
+    try:
+        data = {
+            "campaign_id": campaign_id,
+            "room_pattern": room_pattern,
+            "is_active": is_active
+        }
+        
+        result = supabase.table("campaign_room_mapping").insert(data).execute()
+        
+        if result.data:
+            mapping_id = result.data[0]["id"]
+            print(f"Created campaign room mapping with id: {mapping_id}")
+            return mapping_id
+        else:
+            raise Exception("Failed to create campaign room mapping")
+            
+    except Exception as e:
+        print(f"Error creating campaign room mapping: {e}")
+        raise
+
+def get_campaign_by_room_name(room_name):
+    """Get campaign for a specific room name by matching against room patterns."""
+    try:
+        # Get all active campaign room mappings
+        result = supabase.table("campaign_room_mapping").select("*").eq("is_active", True).execute()
+        
+        if not result.data:
+            # Fallback to most recent campaign if no mappings found
+            return get_campaign_from_db()
+        
+        # Find the first matching pattern
+        for mapping in result.data:
+            pattern = mapping["room_pattern"]
+            if room_name.startswith(pattern):
+                campaign_id = mapping["campaign_id"]
+                return get_campaign_by_id(campaign_id)
+        
+        # If no pattern matches, fallback to most recent campaign
+        print(f"No campaign mapping found for room: {room_name}, using fallback")
+        return get_campaign_from_db()
+            
+    except Exception as e:
+        print(f"Error getting campaign by room name: {e}")
+        # Fallback to most recent campaign
+        return get_campaign_from_db()
+
+def get_campaign_by_id(campaign_id):
+    """Get a specific campaign by ID from Supabase."""
+    try:
+        result = supabase.table("campaign").select("*").eq("id", campaign_id).execute()
+        
+        if result.data:
+            campaign = result.data[0]
+            return {
+                "id": campaign["id"],
+                "name": campaign["name"],
+                "description": campaign["description"],
+                "intro_prompt": campaign["intro_prompt"],
+                "purpose_explanation": campaign["purpose_explanation"],
+                "greeting": campaign["greeting"],
+                "closing": campaign["closing"],
+            }
+        else:
+            raise Exception(f"No campaign found with id: {campaign_id}")
+            
+    except Exception as e:
+        print(f"Error getting campaign by id: {e}")
+        raise
+
+def record_call(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
     """Record a call in Supabase."""
     try:
         data = {
             "phone_number": phone_number,
             "campaign_id": campaign_id,
+            "room_name": room_name,
             "s3_recording_url": s3_recording_url
         }
         
