@@ -25,13 +25,13 @@ def init_db():
     # Note: In Supabase, tables are typically created through the dashboard or migrations
     # This function is kept for compatibility but tables should be created manually in Supabase
     print("Database tables should be created in Supabase dashboard")
-    print("Required tables: campaign, question, call, answer")
+    print("Required tables: campaign, question, survey_response, answer, campaign_room_mapping")
     
     # You can also create tables programmatically if needed:
     # This would require additional setup and permissions
 
 def create_campaign(name, description=None, start_date=None, end_date=None,
-                    intro_prompt=None, purpose_explanation=None, greeting=None, closing=None):
+                    intro_prompt=None, purpose_explanation=None, greeting=None, closing=None, campaign_type=None):
     """Create a new campaign in Supabase."""
     try:
         data = {
@@ -42,7 +42,8 @@ def create_campaign(name, description=None, start_date=None, end_date=None,
             "intro_prompt": intro_prompt,
             "purpose_explanation": purpose_explanation,
             "greeting": greeting,
-            "closing": closing
+            "closing": closing,
+            "campaign_type": campaign_type
         }
         
         # Remove None values
@@ -146,6 +147,7 @@ def get_campaign_by_id(campaign_id):
                 "purpose_explanation": campaign["purpose_explanation"],
                 "greeting": campaign["greeting"],
                 "closing": campaign["closing"],
+                "campaign_type": campaign.get("campaign_type"),
             }
         else:
             raise Exception(f"No campaign found with id: {campaign_id}")
@@ -154,8 +156,8 @@ def get_campaign_by_id(campaign_id):
         print(f"Error getting campaign by id: {e}")
         raise
 
-def record_call(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
-    """Record a call in Supabase."""
+def record_survey_response(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
+    """Record a survey response in Supabase (replaces record_call)."""
     try:
         data = {
             "phone_number": phone_number,
@@ -171,24 +173,29 @@ def record_call(phone_number, campaign_id, room_name, call_timestamp=None, s3_re
         # Remove None values
         data = {k: v for k, v in data.items() if v is not None}
         
-        result = supabase.table("call").insert(data).execute()
+        result = supabase.table("survey_response").insert(data).execute()
         
         if result.data:
-            call_id = result.data[0]["id"]
-            print(f"Recorded call with id: {call_id}")
-            return call_id
+            survey_response_id = result.data[0]["id"]
+            print(f"Recorded survey response with id: {survey_response_id}")
+            return survey_response_id
         else:
-            raise Exception("Failed to record call")
+            raise Exception("Failed to record survey response")
             
     except Exception as e:
-        print(f"Error recording call: {e}")
+        print(f"Error recording survey response: {e}")
         raise
 
-def record_answer(call_id, question_id, answer_text, answered_at=None):
+# Keep the old function name for backward compatibility
+def record_call(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
+    """Record a call in Supabase (legacy wrapper for record_survey_response)."""
+    return record_survey_response(phone_number, campaign_id, room_name, call_timestamp, s3_recording_url)
+
+def record_answer(survey_response_id, question_id, answer_text, answered_at=None):
     """Record an answer in Supabase."""
     try:
-        # First, check if an answer already exists for this call and question
-        existing_result = supabase.table("answer").select("id").eq("call_id", call_id).eq("question_id", question_id).execute()
+        # First, check if an answer already exists for this survey response and question
+        existing_result = supabase.table("answer").select("id").eq("survey_response_id", survey_response_id).eq("question_id", question_id).execute()
         
         if existing_result.data:
             # Answer already exists, update it instead of inserting
@@ -207,7 +214,7 @@ def record_answer(call_id, question_id, answer_text, answered_at=None):
         else:
             # No existing answer, insert new one
             data = {
-                "call_id": call_id,
+                "survey_response_id": survey_response_id,
                 "question_id": question_id,
                 "answer_text": answer_text
             }
@@ -244,6 +251,7 @@ def get_campaign_from_db():
                 "purpose_explanation": campaign["purpose_explanation"],
                 "greeting": campaign["greeting"],
                 "closing": campaign["closing"],
+                "campaign_type": campaign.get("campaign_type"),
             }
         else:
             raise Exception("No campaign found in database.")
@@ -266,26 +274,31 @@ def get_questions_for_campaign(campaign_id):
         print(f"Error getting questions: {e}")
         return []
 
-def update_call_s3_url(call_id, s3_recording_url):
-    """Update the S3 recording URL for a call."""
+def update_survey_response_s3_url(survey_response_id, s3_recording_url):
+    """Update the S3 recording URL for a survey response."""
     try:
-        result = supabase.table("call").update({"s3_recording_url": s3_recording_url}).eq("id", call_id).execute()
+        result = supabase.table("survey_response").update({"s3_recording_url": s3_recording_url}).eq("id", survey_response_id).execute()
         
         if result.data:
-            print(f"Updated call {call_id} with S3 recording URL: {s3_recording_url}")
+            print(f"Updated survey response {survey_response_id} with S3 recording URL: {s3_recording_url}")
             return True
         else:
-            print(f"No call found with id {call_id}")
+            print(f"No survey response found with id {survey_response_id}")
             return False
             
     except Exception as e:
-        print(f"Error updating call S3 URL: {e}")
+        print(f"Error updating survey response S3 URL: {e}")
         return False
 
-def get_existing_answers_for_call(call_id):
-    """Get existing answers for a call to avoid duplicates."""
+# Keep the old function name for backward compatibility
+def update_call_s3_url(call_id, s3_recording_url):
+    """Update the S3 recording URL for a call (legacy wrapper)."""
+    return update_survey_response_s3_url(call_id, s3_recording_url)
+
+def get_existing_answers_for_survey_response(survey_response_id):
+    """Get existing answers for a survey response to avoid duplicates."""
     try:
-        result = supabase.table("answer").select("question_id").eq("call_id", call_id).execute()
+        result = supabase.table("answer").select("question_id").eq("survey_response_id", survey_response_id).execute()
         if result.data:
             return [answer["question_id"] for answer in result.data]
         else:
@@ -293,6 +306,11 @@ def get_existing_answers_for_call(call_id):
     except Exception as e:
         print(f"Error getting existing answers: {e}")
         return []
+
+# Keep the old function name for backward compatibility
+def get_existing_answers_for_call(call_id):
+    """Get existing answers for a call to avoid duplicates (legacy wrapper)."""
+    return get_existing_answers_for_survey_response(call_id)
 
 # Example usage
 if __name__ == "__main__":
@@ -304,7 +322,8 @@ if __name__ == "__main__":
         intro_prompt="You are the automated survey agent for the InnoVet-AMR initiative.",
         purpose_explanation="Thank you for taking part in our InnoVet-AMR survey.",
         greeting="Hello, welcome to our survey.",
-        closing="Thank you for completing this survey. We value your input."
+        closing="Thank you for completing this survey. We value your input.",
+        campaign_type="phone_survey"
     )
 
     # Add all questions from survey_questions.json
