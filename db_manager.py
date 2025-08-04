@@ -25,7 +25,7 @@ def init_db():
     # Note: In Supabase, tables are typically created through the dashboard or migrations
     # This function is kept for compatibility but tables should be created manually in Supabase
     print("Database tables should be created in Supabase dashboard")
-    print("Required tables: campaign, question, survey_response, answer, campaign_room_mapping")
+    print("Required tables: campaign, question, survey_submissions, answer, campaign_room_mapping")
     
     # You can also create tables programmatically if needed:
     # This would require additional setup and permissions
@@ -106,19 +106,24 @@ def create_campaign_room_mapping(campaign_id, room_pattern, is_active=True):
         print(f"Error creating campaign room mapping: {e}")
         raise
 
-def get_existing_survey_response(room_name):
-    """Check if a survey response already exists for a given room name."""
+def get_existing_survey_submission(room_name):
+    """Check if a survey submission already exists for a given room name."""
     try:
-        result = supabase.table("survey_response").select("*").eq("room_name", room_name).execute()
+        result = supabase.table("survey_submissions").select("*").eq("room_name", room_name).execute()
         
         if result.data:
-            return result.data[0]  # Return the first (should be only) matching response
+            return result.data[0]  # Return the first (should be only) matching submission
         else:
             return None
             
     except Exception as e:
-        print(f"Error checking existing survey response: {e}")
+        print(f"Error checking existing survey submission: {e}")
         return None
+
+# Keep backward compatibility
+def get_existing_survey_response(room_name):
+    """Check if a survey response already exists for a given room name (legacy wrapper)."""
+    return get_existing_survey_submission(room_name)
 
 def get_campaign_by_room_name(room_name):
     """Get campaign for a specific room name by matching against room patterns."""
@@ -170,19 +175,27 @@ def get_campaign_by_id(campaign_id):
         print(f"Error getting campaign by id: {e}")
         raise
 
-def record_survey_response(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
-    """Record a survey response in Supabase (replaces record_call). Check for duplicates first."""
+def record_survey_submission(phone_number=None, campaign_id=None, room_name=None, 
+                           call_timestamp=None, s3_recording_url=None, 
+                           full_name=None, email=None, geography=None, 
+                           occupation=None, invitation_token=None):
+    """Record a survey submission in Supabase. Check for duplicates first."""
     try:
-        # First check if a survey response already exists for this room
-        existing_response = get_existing_survey_response(room_name)
-        if existing_response:
-            print(f"Survey response already exists for room {room_name} with id: {existing_response['id']}")
-            return existing_response['id']
+        # First check if a survey submission already exists for this room
+        existing_submission = get_existing_survey_submission(room_name)
+        if existing_submission:
+            print(f"Survey submission already exists for room {room_name} with id: {existing_submission['id']}")
+            return existing_submission['id']
         
         data = {
-            "phone_number": phone_number,
             "campaign_id": campaign_id,
             "room_name": room_name,
+            "phone_number": phone_number,
+            "full_name": full_name,
+            "email": email,
+            "geography": geography,
+            "occupation": occupation,
+            "invitation_token": invitation_token,
             "s3_recording_url": s3_recording_url
         }
         
@@ -193,29 +206,45 @@ def record_survey_response(phone_number, campaign_id, room_name, call_timestamp=
         # Remove None values
         data = {k: v for k, v in data.items() if v is not None}
         
-        result = supabase.table("survey_response").insert(data).execute()
+        result = supabase.table("survey_submissions").insert(data).execute()
         
         if result.data:
-            survey_response_id = result.data[0]["id"]
-            print(f"Recorded survey response with id: {survey_response_id}")
-            return survey_response_id
+            submission_id = result.data[0]["id"]
+            print(f"Recorded survey submission with id: {submission_id}")
+            return submission_id
         else:
-            raise Exception("Failed to record survey response")
+            raise Exception("Failed to record survey submission")
             
     except Exception as e:
-        print(f"Error recording survey response: {e}")
+        print(f"Error recording survey submission: {e}")
         raise
+
+def record_survey_response(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
+    """Record a survey response in Supabase (legacy wrapper for record_survey_submission)."""
+    return record_survey_submission(
+        phone_number=phone_number, 
+        campaign_id=campaign_id, 
+        room_name=room_name, 
+        call_timestamp=call_timestamp, 
+        s3_recording_url=s3_recording_url
+    )
 
 # Keep the old function name for backward compatibility
 def record_call(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
-    """Record a call in Supabase (legacy wrapper for record_survey_response)."""
-    return record_survey_response(phone_number, campaign_id, room_name, call_timestamp, s3_recording_url)
+    """Record a call in Supabase (legacy wrapper for record_survey_submission)."""
+    return record_survey_submission(
+        phone_number=phone_number, 
+        campaign_id=campaign_id, 
+        room_name=room_name, 
+        call_timestamp=call_timestamp, 
+        s3_recording_url=s3_recording_url
+    )
 
-def record_answer(survey_response_id, question_id, answer_text, answered_at=None):
-    """Record an answer in Supabase."""
+def record_answer(survey_submission_id, question_id, answer_text, answered_at=None):
+    """Record an answer in Supabase using survey_submission_id."""
     try:
-        # First, check if an answer already exists for this survey response and question
-        existing_result = supabase.table("answer").select("id").eq("survey_response_id", survey_response_id).eq("question_id", question_id).execute()
+        # First, check if an answer already exists for this survey submission and question
+        existing_result = supabase.table("answer").select("id").eq("survey_submission_id", survey_submission_id).eq("question_id", question_id).execute()
         
         if existing_result.data:
             # Answer already exists, update it instead of inserting
@@ -234,7 +263,7 @@ def record_answer(survey_response_id, question_id, answer_text, answered_at=None
         else:
             # No existing answer, insert new one
             data = {
-                "survey_response_id": survey_response_id,
+                "survey_submission_id": survey_submission_id,
                 "question_id": question_id,
                 "answer_text": answer_text
             }
@@ -294,31 +323,35 @@ def get_questions_for_campaign(campaign_id):
         print(f"Error getting questions: {e}")
         return []
 
-def update_survey_response_s3_url(survey_response_id, s3_recording_url):
-    """Update the S3 recording URL for a survey response."""
+def update_survey_submission_s3_url(submission_id, s3_recording_url):
+    """Update the S3 recording URL for a survey submission."""
     try:
-        result = supabase.table("survey_response").update({"s3_recording_url": s3_recording_url}).eq("id", survey_response_id).execute()
+        result = supabase.table("survey_submissions").update({"s3_recording_url": s3_recording_url}).eq("id", submission_id).execute()
         
         if result.data:
-            print(f"Updated survey response {survey_response_id} with S3 recording URL: {s3_recording_url}")
+            print(f"Updated survey submission {submission_id} with S3 recording URL: {s3_recording_url}")
             return True
         else:
-            print(f"No survey response found with id {survey_response_id}")
+            print(f"No survey submission found with id {submission_id}")
             return False
             
     except Exception as e:
-        print(f"Error updating survey response S3 URL: {e}")
+        print(f"Error updating survey submission S3 URL: {e}")
         return False
+
+def update_survey_response_s3_url(survey_response_id, s3_recording_url):
+    """Update the S3 recording URL for a survey response (legacy wrapper)."""
+    return update_survey_submission_s3_url(survey_response_id, s3_recording_url)
 
 # Keep the old function name for backward compatibility
 def update_call_s3_url(call_id, s3_recording_url):
     """Update the S3 recording URL for a call (legacy wrapper)."""
-    return update_survey_response_s3_url(call_id, s3_recording_url)
+    return update_survey_submission_s3_url(call_id, s3_recording_url)
 
-def get_existing_answers_for_survey_response(survey_response_id):
-    """Get existing answers for a survey response to avoid duplicates."""
+def get_existing_answers_for_survey_submission(submission_id):
+    """Get existing answers for a survey submission to avoid duplicates."""
     try:
-        result = supabase.table("answer").select("question_id").eq("survey_response_id", survey_response_id).execute()
+        result = supabase.table("answer").select("question_id").eq("survey_submission_id", submission_id).execute()
         if result.data:
             return [answer["question_id"] for answer in result.data]
         else:
@@ -327,43 +360,51 @@ def get_existing_answers_for_survey_response(survey_response_id):
         print(f"Error getting existing answers: {e}")
         return []
 
+def get_existing_answers_for_survey_response(survey_response_id):
+    """Get existing answers for a survey response to avoid duplicates (legacy wrapper)."""
+    return get_existing_answers_for_survey_submission(survey_response_id)
+
 # Keep the old function name for backward compatibility
 def get_existing_answers_for_call(call_id):
     """Get existing answers for a call to avoid duplicates (legacy wrapper)."""
-    return get_existing_answers_for_survey_response(call_id)
+    return get_existing_answers_for_survey_submission(call_id)
 
-def cleanup_duplicate_survey_responses():
-    """Utility function to clean up duplicate survey responses for the same room."""
+def cleanup_duplicate_survey_submissions():
+    """Utility function to clean up duplicate survey submissions for the same room."""
     try:
-        # Get all survey responses grouped by room_name
-        result = supabase.table("survey_response").select("*").order("room_name").order("created_at").execute()
+        # Get all survey submissions grouped by room_name
+        result = supabase.table("survey_submissions").select("*").order("room_name").order("created_at").execute()
         
         if not result.data:
-            print("No survey responses found")
+            print("No survey submissions found")
             return
         
-        room_responses = {}
-        for response in result.data:
-            room_name = response['room_name']
-            if room_name not in room_responses:
-                room_responses[room_name] = []
-            room_responses[room_name].append(response)
+        room_submissions = {}
+        for submission in result.data:
+            room_name = submission['room_name']
+            if room_name not in room_submissions:
+                room_submissions[room_name] = []
+            room_submissions[room_name].append(submission)
         
         # Find and remove duplicates (keep the first one)
-        for room_name, responses in room_responses.items():
-            if len(responses) > 1:
-                print(f"Found {len(responses)} duplicate responses for room: {room_name}")
-                # Keep the first response, delete the rest
-                responses_to_delete = responses[1:]
-                for response in responses_to_delete:
-                    print(f"Deleting duplicate survey response ID: {response['id']}")
+        for room_name, submissions in room_submissions.items():
+            if len(submissions) > 1:
+                print(f"Found {len(submissions)} duplicate submissions for room: {room_name}")
+                # Keep the first submission, delete the rest
+                submissions_to_delete = submissions[1:]
+                for submission in submissions_to_delete:
+                    print(f"Deleting duplicate survey submission ID: {submission['id']}")
                     # First delete associated answers
-                    supabase.table("answer").delete().eq("survey_response_id", response['id']).execute()
-                    # Then delete the survey response
-                    supabase.table("survey_response").delete().eq("id", response['id']).execute()
+                    supabase.table("answer").delete().eq("survey_submission_id", submission['id']).execute()
+                    # Then delete the survey submission
+                    supabase.table("survey_submissions").delete().eq("id", submission['id']).execute()
                     
     except Exception as e:
         print(f"Error cleaning up duplicates: {e}")
+
+def cleanup_duplicate_survey_responses():
+    """Utility function to clean up duplicate survey responses for the same room (legacy wrapper)."""
+    return cleanup_duplicate_survey_submissions()
 
 # Example usage
 if __name__ == "__main__":
