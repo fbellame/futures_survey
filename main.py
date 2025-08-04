@@ -15,11 +15,14 @@ import re
 from user_data import UserData
 from recording import start_s3_recording
 
-# --- New imports for DB integration ---
+# --- Updated imports for DB integration ---
 from db_manager import (
     record_call, record_answer, 
     get_campaign_from_db, get_questions_for_campaign, update_call_s3_url,
-    get_campaign_by_room_name, get_campaign_by_id, get_existing_survey_response
+    get_campaign_by_room_name, get_campaign_by_id, 
+    get_existing_survey_response, get_existing_survey_submission,
+    record_survey_submission, update_survey_submission_s3_url,
+    get_existing_answers_for_survey_submission
 )
 
 load_dotenv()
@@ -90,19 +93,18 @@ class MainAgent(Agent):
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
 
-# --- Remove S3 JSON save, use DB instead ---
-async def save_userdata_to_db(userdata: UserData, campaign_id: int, call_id: int):
+# --- Updated to use survey_submissions table ---
+async def save_userdata_to_db(userdata: UserData, campaign_id: int, submission_id: int):
     # Save S3 recording URL if present
     if getattr(userdata, 's3_recording_url', None):
-        update_call_s3_url(call_id, userdata.s3_recording_url)
-        logger.info(f"Updated call {call_id} with S3 recording URL: {userdata.s3_recording_url}")
+        update_survey_submission_s3_url(submission_id, userdata.s3_recording_url)
+        logger.info(f"Updated survey submission {submission_id} with S3 recording URL: {userdata.s3_recording_url}")
     elif getattr(userdata, 'recording_id', None):
         # Optionally, if you have a way to build the S3 URL from recording_id, do it here
         pass
     
     # Get existing answers to avoid duplicates
-    from db_manager import get_existing_answers_for_call
-    existing_question_ids = get_existing_answers_for_call(call_id)
+    existing_question_ids = get_existing_answers_for_survey_submission(submission_id)
     
     # Save all answers to DB
     for q_num, answer in userdata.questionnaire_answers.items():
@@ -117,7 +119,7 @@ async def save_userdata_to_db(userdata: UserData, campaign_id: int, call_id: int
         if question_id:
             # Only record if this question hasn't been answered yet
             if question_id not in existing_question_ids:
-                record_answer(call_id, question_id, answer)
+                record_answer(submission_id, question_id, answer)
                 logger.info(f"Saved answer for question {q_num} to DB.")
             else:
                 logger.info(f"Answer for question {q_num} already exists, skipping.")
@@ -148,7 +150,7 @@ async def check_survey_complete(ctx: RunContext_T) -> str:
     logger.info(f"Survey completion check: {answered_questions}/{total_questions} questions answered")
     if answered_questions == total_questions:
         # Save complete survey to DB
-        await save_userdata_to_db(userdata, userdata.campaign["id"], userdata.call_id)
+        await save_userdata_to_db(userdata, userdata.campaign["id"], userdata.submission_id)
         logger.info("Survey completed - all data saved to DB")
         return f"Survey is complete! All {total_questions} questions have been answered and data has been saved to the database."
     else:
@@ -186,21 +188,27 @@ async def entrypoint(ctx: agents.JobContext):
     logger.info(f"Room name: {room_name}")
     logger.info(f"Participant ID: {participant_id}")
     
-    # Check if survey response already exists for this room
-    existing_response = get_existing_survey_response(room_name)
-    if existing_response:
-        logger.info(f"Survey response already exists for room {room_name} (ID: {existing_response['id']})")
-        call_id = existing_response['id']
-        campaign_id = existing_response['campaign_id']
+    # Check if survey submission already exists for this room
+    existing_submission = get_existing_survey_submission(room_name)
+    if existing_submission:
+        logger.info(f"Survey submission already exists for room {room_name} (ID: {existing_submission['id']})")
+        submission_id = existing_submission['id']
+        campaign_id = existing_submission['campaign_id']
         campaign = get_campaign_by_id(campaign_id)
     else:
         # Select campaign based on room name
         campaign = get_campaign_by_room_name(room_name)
         logger.info(f"Selected campaign: {campaign['name']} (ID: {campaign['id']})")
         
-        # Create new survey response only if one doesn't exist
-        call_id = record_call(participant_id, campaign["id"], room_name, s3_recording_url=None)
-        logger.info(f"New survey response recorded in DB with id: {call_id}")
+        # Create new survey submission only if one doesn't exist
+        submission_id = record_survey_submission(
+            phone_number=participant_id if phone_number else None,
+            email=participant_id if email else None,
+            campaign_id=campaign["id"], 
+            room_name=room_name, 
+            s3_recording_url=None
+        )
+        logger.info(f"New survey submission recorded in DB with id: {submission_id}")
     
     # Initialize user data
     userdata = UserData()
@@ -216,22 +224,25 @@ async def entrypoint(ctx: agents.JobContext):
     })
     userdata.questions = userdata.agents["main_agent"].questions
     userdata.campaign = campaign  # Store campaign dict in userdata
-    userdata.call_id = call_id  # Set call_id early
+    userdata.submission_id = submission_id  # Set submission_id instead of call_id
+    
+    # For backward compatibility, also set call_id to submission_id
+    userdata.call_id = submission_id
     
     # Start S3 voice recording only if not already started
-    if not existing_response or not existing_response.get('s3_recording_url'):
+    if not existing_submission or not existing_submission.get('s3_recording_url'):
         recording_success = await start_s3_recording(room_name, userdata)
         if recording_success:
             logger.info("S3 Recording started successfully")
-            # Update the survey response with the recording URL
+            # Update the survey submission with the recording URL
             if hasattr(userdata, 's3_recording_url') and userdata.s3_recording_url:
-                update_call_s3_url(call_id, userdata.s3_recording_url)
+                update_survey_submission_s3_url(submission_id, userdata.s3_recording_url)
         else:
             logger.warning("S3 Recording failed, continuing without recording")
             userdata.s3_recording_url = None  # Explicitly set to None if failed
     else:
-        logger.info("S3 Recording already exists for this survey response")
-        userdata.s3_recording_url = existing_response.get('s3_recording_url')
+        logger.info("S3 Recording already exists for this survey submission")
+        userdata.s3_recording_url = existing_submission.get('s3_recording_url')
     
     await ctx.connect()
     session = AgentSession(
