@@ -106,6 +106,20 @@ def create_campaign_room_mapping(campaign_id, room_pattern, is_active=True):
         print(f"Error creating campaign room mapping: {e}")
         raise
 
+def get_existing_survey_response(room_name):
+    """Check if a survey response already exists for a given room name."""
+    try:
+        result = supabase.table("survey_response").select("*").eq("room_name", room_name).execute()
+        
+        if result.data:
+            return result.data[0]  # Return the first (should be only) matching response
+        else:
+            return None
+            
+    except Exception as e:
+        print(f"Error checking existing survey response: {e}")
+        return None
+
 def get_campaign_by_room_name(room_name):
     """Get campaign for a specific room name by matching against room patterns."""
     try:
@@ -157,8 +171,14 @@ def get_campaign_by_id(campaign_id):
         raise
 
 def record_survey_response(phone_number, campaign_id, room_name, call_timestamp=None, s3_recording_url=None):
-    """Record a survey response in Supabase (replaces record_call)."""
+    """Record a survey response in Supabase (replaces record_call). Check for duplicates first."""
     try:
+        # First check if a survey response already exists for this room
+        existing_response = get_existing_survey_response(room_name)
+        if existing_response:
+            print(f"Survey response already exists for room {room_name} with id: {existing_response['id']}")
+            return existing_response['id']
+        
         data = {
             "phone_number": phone_number,
             "campaign_id": campaign_id,
@@ -311,6 +331,39 @@ def get_existing_answers_for_survey_response(survey_response_id):
 def get_existing_answers_for_call(call_id):
     """Get existing answers for a call to avoid duplicates (legacy wrapper)."""
     return get_existing_answers_for_survey_response(call_id)
+
+def cleanup_duplicate_survey_responses():
+    """Utility function to clean up duplicate survey responses for the same room."""
+    try:
+        # Get all survey responses grouped by room_name
+        result = supabase.table("survey_response").select("*").order("room_name").order("created_at").execute()
+        
+        if not result.data:
+            print("No survey responses found")
+            return
+        
+        room_responses = {}
+        for response in result.data:
+            room_name = response['room_name']
+            if room_name not in room_responses:
+                room_responses[room_name] = []
+            room_responses[room_name].append(response)
+        
+        # Find and remove duplicates (keep the first one)
+        for room_name, responses in room_responses.items():
+            if len(responses) > 1:
+                print(f"Found {len(responses)} duplicate responses for room: {room_name}")
+                # Keep the first response, delete the rest
+                responses_to_delete = responses[1:]
+                for response in responses_to_delete:
+                    print(f"Deleting duplicate survey response ID: {response['id']}")
+                    # First delete associated answers
+                    supabase.table("answer").delete().eq("survey_response_id", response['id']).execute()
+                    # Then delete the survey response
+                    supabase.table("survey_response").delete().eq("id", response['id']).execute()
+                    
+    except Exception as e:
+        print(f"Error cleaning up duplicates: {e}")
 
 # Example usage
 if __name__ == "__main__":

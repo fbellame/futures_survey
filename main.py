@@ -1,4 +1,3 @@
-
 import logging
 
 from datetime import datetime, timezone
@@ -20,7 +19,7 @@ from recording import start_s3_recording
 from db_manager import (
     record_call, record_answer, 
     get_campaign_from_db, get_questions_for_campaign, update_call_s3_url,
-    get_campaign_by_room_name, get_campaign_by_id
+    get_campaign_by_room_name, get_campaign_by_id, get_existing_survey_response
 )
 
 load_dotenv()
@@ -157,24 +156,56 @@ async def check_survey_complete(ctx: RunContext_T) -> str:
         return f"Survey is not complete. {answered_questions}/{total_questions} questions answered. Missing questions: {missing_questions}"
 
 def extract_phone_from_room_name(room_name: str) -> str:
+    """Extract phone number from room name for phone call patterns."""
     pattern = r'call-_(\+\d+)_'
     match = re.search(pattern, room_name)
     if match:
         return match.group(1)
     return None
+
+def extract_email_from_room_name(room_name: str) -> str:
+    """Extract email from room name for email survey patterns."""
+    # Check if this is an email survey room pattern
+    if room_name.startswith('survey-'):
+        # This would need to be implemented based on your email survey creation logic
+        # For now, return None as phone number extraction doesn't apply
+        return None
+    return None
     
 async def entrypoint(ctx: agents.JobContext):
     room = ctx.room
     room_name = room.name
+    
+    # Extract identifier (phone or email) from room name
     phone_number = extract_phone_from_room_name(room_name)
+    email = extract_email_from_room_name(room_name)
+    
+    # Determine participant identifier
+    participant_id = phone_number if phone_number else (email if email else "unknown")
+    
+    logger.info(f"Room name: {room_name}")
+    logger.info(f"Participant ID: {participant_id}")
+    
+    # Check if survey response already exists for this room
+    existing_response = get_existing_survey_response(room_name)
+    if existing_response:
+        logger.info(f"Survey response already exists for room {room_name} (ID: {existing_response['id']})")
+        call_id = existing_response['id']
+        campaign_id = existing_response['campaign_id']
+        campaign = get_campaign_by_id(campaign_id)
+    else:
+        # Select campaign based on room name
+        campaign = get_campaign_by_room_name(room_name)
+        logger.info(f"Selected campaign: {campaign['name']} (ID: {campaign['id']})")
+        
+        # Create new survey response only if one doesn't exist
+        call_id = record_call(participant_id, campaign["id"], room_name, s3_recording_url=None)
+        logger.info(f"New survey response recorded in DB with id: {call_id}")
+    
+    # Initialize user data
     userdata = UserData()
     userdata.customer_phone = phone_number if phone_number else None
-    logger.info(f"Room name: {room_name}")
-    logger.info(f"Phone number: {phone_number}")
-    
-    # Select campaign based on room name
-    campaign = get_campaign_by_room_name(room_name)
-    logger.info(f"Selected campaign: {campaign['name']} (ID: {campaign['id']})")
+    userdata.customer_email = email if email else None
     
     # Get questions for the selected campaign
     questions = get_questions_for_campaign(campaign["id"])
@@ -185,19 +216,22 @@ async def entrypoint(ctx: agents.JobContext):
     })
     userdata.questions = userdata.agents["main_agent"].questions
     userdata.campaign = campaign  # Store campaign dict in userdata
+    userdata.call_id = call_id  # Set call_id early
     
-    # Start S3 voice recording before recording the call in the DB
-    recording_success = await start_s3_recording(room_name, userdata)
-    if recording_success:
-        logger.info("S3 Recording started successfully")
+    # Start S3 voice recording only if not already started
+    if not existing_response or not existing_response.get('s3_recording_url'):
+        recording_success = await start_s3_recording(room_name, userdata)
+        if recording_success:
+            logger.info("S3 Recording started successfully")
+            # Update the survey response with the recording URL
+            if hasattr(userdata, 's3_recording_url') and userdata.s3_recording_url:
+                update_call_s3_url(call_id, userdata.s3_recording_url)
+        else:
+            logger.warning("S3 Recording failed, continuing without recording")
+            userdata.s3_recording_url = None  # Explicitly set to None if failed
     else:
-        logger.warning("S3 Recording failed, continuing without recording")
-        userdata.s3_recording_url = None  # Explicitly set to None if failed
-    
-    # Record the call in the DB with room name
-    call_id = record_call(phone_number or "unknown", campaign["id"], room_name, s3_recording_url=userdata.s3_recording_url)
-    userdata.call_id = call_id
-    logger.info(f"Call recorded in DB with id: {call_id}")
+        logger.info("S3 Recording already exists for this survey response")
+        userdata.s3_recording_url = existing_response.get('s3_recording_url')
     
     await ctx.connect()
     session = AgentSession(
