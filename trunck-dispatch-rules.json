@@ -1,0 +1,30 @@
+{
+  "sipTrunkId": "ST_ikhLNe64fBHr",
+  "name": "livekit-alex-trunk",
+  "numbers": [
+    "+14313047931"
+  ],
+  "krispEnabled": true,
+  "includeHeaders": "SIP_ALL_HEADERS"
+}
+
+{
+  "sipDispatchRuleId": "SDR_ZrnpMVgtCzRE",
+  "rule": {
+    "dispatchRuleIndividual": {
+      "roomPrefix": "call-"
+    }
+  },
+  "trunkIds": [
+    "ST_ikhLNe64fBHr"
+  ],
+  "name": "My dispatch rule",
+  "roomConfig": {
+    "agents": [
+      {
+        "agentName": "alex-telephony-agent",
+        "metadata": "caller-number"
+      }
+    ]
+  }
+}
