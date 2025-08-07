@@ -142,6 +142,7 @@ async def send_survey_status(ctx: RunContext_T, status: str, message: str = ""):
     except Exception as e:
         logger.error(f"Failed to send survey status: {e}")
 
+
 class MainAgent(Agent):
     def __init__(self, campaign, questions) -> None:
         MAIN_PROMPT, self.campaign, self.questions = build_dynamic_prompt_from_db(campaign)
@@ -241,10 +242,6 @@ async def set_questionnaire_answer(
         await send_survey_status(ctx, "in_progress", "All questions answered, ready for completion")
         return f"Answer for question {question_number} has been saved successfully. Survey complete - ready for finalization: {answer}"
     else:
-        # Send initial progress update on first answer if this is question 1
-        if question_number == "1":
-            await send_survey_status(ctx, "started", f"Survey has begun with first answer")
-        
         return f"Answer for question {question_number} has been saved successfully: {answer}"
 
 @function_tool
@@ -407,6 +404,49 @@ async def entrypoint(ctx: agents.JobContext):
             noise_cancellation=noise_cancellation.BVC(),
         ),
     )
+    
+    # Send the first question to the frontend after session starts
+    # Send directly using userdata.room without creating a RunContext
+    if userdata.questions:
+        first_question = userdata.questions[0]  # (q_id, q_text, q_order)
+        
+        # Send progress update with first question
+        progress_data = {
+            "type": "survey_progress",
+            "current_question_number": "1",
+            "current_question_text": first_question[1],  # q_text
+            "total_questions": len(userdata.questions),
+            "answered_questions": 0,
+            "last_answer": None,
+            "completion_percentage": 0.0,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Send status update
+        status_data = {
+            "type": "survey_status",
+            "status": "started",
+            "message": "Survey has begun with first question",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            if userdata.room:
+                # Send progress update
+                progress_payload = json.dumps(progress_data).encode('utf-8')
+                await userdata.room.local_participant.publish_data(progress_payload, reliable=True)
+                logger.info(f"First question progress update sent: {progress_data}")
+                
+                # Send status update
+                status_payload = json.dumps(status_data).encode('utf-8')
+                await userdata.room.local_participant.publish_data(status_payload, reliable=True)
+                logger.info(f"Survey status sent: started - Survey has begun with first question")
+                
+                logger.info(f"First question sent to frontend: {first_question[1]}")
+            else:
+                logger.warning("Room not available in userdata, cannot send first question")
+        except Exception as e:
+            logger.error(f"Failed to send first question update: {e}")
 
 if __name__ == "__main__": 
     #agents.cli.run_app(agents.WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm, agent_name="alex-telephony-agent"))
