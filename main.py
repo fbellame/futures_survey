@@ -62,9 +62,7 @@ SURVEY FLOW (ask only one question at a time)
    After the recap, call check_survey_complete to ensure all questions were answered.
 
 {len(questions) + 4}) Closing:
-   If complete, say:
-   \"{campaign['closing']}\"
-   Then immediately end the call using the end_call function.
+   Survey will automatically end when check_survey_complete confirms all questions are answered.
 
 GENERAL GUIDELINES
 Ask only one question at a time.
@@ -124,11 +122,11 @@ async def send_transcript_update(ctx: RunContext_T, text: str, speaker: str):
         logger.error(f"Failed to send transcript update: {e}")
 
 async def send_survey_status(ctx: RunContext_T, status: str, message: str = ""):
-    """Send survey status updates (started, completed, error)"""
+    """Send survey status updates (started, in_progress, completed, closing, error)"""
     userdata = ctx.userdata
     status_data = {
         "type": "survey_status",
-        "status": status,  # "started", "in_progress", "completed", "error"
+        "status": status,  # "started", "in_progress", "completed", "closing", "error"
         "message": message,
         "timestamp": datetime.now().isoformat()
     }
@@ -267,11 +265,42 @@ async def check_survey_complete(ctx: RunContext_T) -> str:
         # Send final progress update
         await send_progress_update(ctx, current_question=None, last_answer=None)
         
-        return f"Survey is complete! All {total_questions} questions have been answered and data has been saved to the database."
+        # Automatically end the call after completion
+        closing_message = userdata.campaign.get("closing", "Thank you for completing the survey. Goodbye!")
+        
+        # Say the closing message first
+        if hasattr(userdata, 'session') and userdata.session:
+            await userdata.session.say(closing_message, allow_interruptions=False)
+        
+        # Send closing status and end the call
+        await send_survey_status(ctx, "closing", "Survey completed, ending call")
+        logger.info("Survey call ending - closing status sent")
+        
+        # End the session using the correct method
+        if hasattr(userdata, 'session') and userdata.session:
+            try:
+                await userdata.session.aclose()
+            except Exception as e:
+                logger.warning(f"Error closing session: {e}")
+                # Session may already be closed or closing, which is fine
+        
+        return f"Survey complete! Said closing message and ended the call."
     else:
         missing_questions = [str(q[2]) for q in userdata.questions if str(q[2]) not in userdata.questionnaire_answers]
         await send_survey_status(ctx, "in_progress", f"Survey incomplete. Missing questions: {missing_questions}")
         return f"Survey is not complete. {answered_questions}/{total_questions} questions answered. Missing questions: {missing_questions}"
+
+@function_tool
+async def end_call(ctx: RunContext_T) -> str:
+    """End the survey call after sending closing status"""
+    userdata = ctx.userdata
+    
+    # Send closing status to indicate the call is ending
+    await send_survey_status(ctx, "closing", "Survey completed, ending call")
+    
+    logger.info("Survey call ending - closing status sent")
+        
+    return "Call ended successfully"
 
 def extract_phone_from_room_name(room_name: str) -> str:
     """Extract phone number from room name for phone call patterns."""
