@@ -51,6 +51,72 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE OR REPLACE FUNCTION "public"."get_campaign_generic_summary"("campaign_id_param" bigint) RETURNS TABLE("total_submissions" bigint, "unique_participants" bigint, "unique_tokens" bigint, "first_submission" timestamp with time zone, "last_submission" timestamp with time zone)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    COUNT(*)::BIGINT as total_submissions,
+    COUNT(DISTINCT ss.email)::BIGINT as unique_participants,
+    COUNT(DISTINCT ss.invitation_token)::BIGINT as unique_tokens,
+    MIN(ss.created_at) as first_submission,
+    MAX(ss.created_at) as last_submission
+  FROM public.survey_submissions ss
+  WHERE ss.campaign_id = campaign_id_param 
+    AND ss.invitation_token IS NOT NULL
+    AND ss.invitation_token != '';
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_campaign_generic_summary"("campaign_id_param" bigint) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_campaign_generic_usage"("campaign_id_param" bigint) RETURNS TABLE("access_token" "text", "email" "text", "used_at" timestamp with time zone, "campaign_id" bigint, "full_name" "text")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    ss.invitation_token as access_token,
+    ss.email,
+    ss.created_at as used_at,
+    ss.campaign_id,
+    ss.full_name
+  FROM public.survey_submissions ss
+  WHERE ss.campaign_id = campaign_id_param 
+    AND ss.invitation_token IS NOT NULL
+    AND ss.invitation_token != ''
+  ORDER BY ss.created_at DESC;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_campaign_generic_usage"("campaign_id_param" bigint) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."get_generic_link_usage_count"("token" "text") RETURNS TABLE("access_token" "text", "usage_count" bigint, "unique_emails" bigint, "first_used" timestamp with time zone, "last_used" timestamp with time zone)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    ss.invitation_token as access_token,
+    COUNT(*)::BIGINT as usage_count,
+    COUNT(DISTINCT ss.email)::BIGINT as unique_emails,
+    MIN(ss.created_at) as first_used,
+    MAX(ss.created_at) as last_used
+  FROM public.survey_submissions ss
+  WHERE ss.invitation_token = token
+  GROUP BY ss.invitation_token;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."get_generic_link_usage_count"("token" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."update_invitation_responded_at"("token" "text", "responded_timestamp" timestamp with time zone) RETURNS TABLE("id" "uuid", "responded_at" timestamp with time zone)
     LANGUAGE "plpgsql" SECURITY DEFINER
     AS $$
@@ -198,13 +264,14 @@ CREATE TABLE IF NOT EXISTS "public"."survey_invitations" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "campaign_id" bigint NOT NULL,
     "email" "text" NOT NULL,
-    "unique_token" "text" DEFAULT "encode"("extensions"."gen_random_bytes"(32), 'base64'::"text") NOT NULL,
+    "unique_token" "text" DEFAULT "rtrim"("translate"("encode"("extensions"."gen_random_bytes"(32), 'base64'::"text"), '+/'::"text", '-_'::"text"), '='::"text") NOT NULL,
     "qr_code_url" "text",
     "sent_at" timestamp with time zone,
     "responded_at" timestamp with time zone,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "user_id" "uuid"
+    "user_id" "uuid",
+    "phone_number" "text"
 );
 
 
@@ -313,6 +380,26 @@ CREATE INDEX "idx_survey_invitations_email" ON "public"."survey_invitations" USI
 
 
 CREATE INDEX "idx_survey_invitations_token" ON "public"."survey_invitations" USING "btree" ("unique_token");
+
+
+
+CREATE UNIQUE INDEX "ux_invites_campaign_email" ON "public"."survey_invitations" USING "btree" ("campaign_id", "lower"("email"));
+
+
+
+CREATE UNIQUE INDEX "ux_invites_campaign_phone" ON "public"."survey_invitations" USING "btree" ("campaign_id", "phone_number") WHERE ("phone_number" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "ux_submissions_campaign_email" ON "public"."survey_submissions" USING "btree" ("campaign_id", "lower"("email")) WHERE ("email" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "ux_submissions_campaign_invitation" ON "public"."survey_submissions" USING "btree" ("campaign_id", "invitation_token") WHERE ("invitation_token" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "ux_submissions_campaign_phone" ON "public"."survey_submissions" USING "btree" ("campaign_id", "phone_number") WHERE ("phone_number" IS NOT NULL);
 
 
 
@@ -632,6 +719,24 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
+
+
+
+GRANT ALL ON FUNCTION "public"."get_campaign_generic_summary"("campaign_id_param" bigint) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_campaign_generic_summary"("campaign_id_param" bigint) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_campaign_generic_summary"("campaign_id_param" bigint) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_campaign_generic_usage"("campaign_id_param" bigint) TO "anon";
+GRANT ALL ON FUNCTION "public"."get_campaign_generic_usage"("campaign_id_param" bigint) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_campaign_generic_usage"("campaign_id_param" bigint) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."get_generic_link_usage_count"("token" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."get_generic_link_usage_count"("token" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."get_generic_link_usage_count"("token" "text") TO "service_role";
 
 
 
